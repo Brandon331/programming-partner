@@ -24,7 +24,7 @@ class PermissionGate:
         """
         confirm_callback: función que le pregunta al usuario (vía la mascota,
         en el producto final) si permite la acción. Si no se provee, el gate
-        se comporta en modo "auto-permitir" (útil para pruebas/demo).
+        el gate deniega la acción si no se configuró una función de confirmación.
         """
         self._confirm_callback = confirm_callback
 
@@ -35,10 +35,10 @@ class PermissionGate:
     def check(self, tool_name: str, arguments: dict, risk_level: RiskLevel) -> bool:
         """
         Devuelve True si la tool puede ejecutarse.
-        Verde: pasa directo. Amarillo/rojo: pregunta, salvo que no haya callback.
+        Verde: pasa directo. Amarillo/rojo: pregunta; sin callback se deniega.
         """
         if not self.requires_confirmation(risk_level):
             return True
         if self._confirm_callback is None:
-            return True
+            return False
         return self._confirm_callback(tool_name, arguments, risk_level)
