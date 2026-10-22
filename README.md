@@ -1,76 +1,104 @@
-# Esqueleto del loop del agente — semana 1-2
+# Programming Partner — backend local
 
-Implementa el ciclo descrito en `planeacion_mvp` ("El ciclo del agente") y los
-contratos de `contrato_eventos_tools`: eventos (Pydantic) + tools
-(`read_file`, `edit_file`, `run_command`), hablando con un proxy en vez de
-directo a OpenAI.
+Backend inicial para la app de escritorio. Conserva el loop del agente, el bus de eventos, el proxy y la demo existentes; agrega API HTTP versionada, autenticación local, proyectos SQLite, ejecución de tareas en segundo plano y transmisión SSE de eventos. La API y el agente no dependen de Electron ni de la mascota.
 
-## Estructura
+El servidor local funciona sin proveedor de IA: en ese modo devuelve una respuesta de conexión para verificar la integración. GitHub es de solo lectura en este incremento.
 
+## Estructura del código
+
+- `api/`: rutas y servidor HTTP/SSE (`api/server.py`). `api_server.py` conserva un punto de entrada sencillo.
+- `domain/`: errores del dominio y reglas compartidas.
+- `infrastructure/`: SQLite, autenticación y adaptador de GitHub.
+- `services/`: ejecución de tareas y coordinación de aprobaciones.
+- `agent_loop.py`, `events.py`, `event_bus.py` y `tools.py`: loop original, contratos y herramientas del agente.
+- `demo/` y `documentation/`: demo con proxy simulado y guía del bus de eventos.
+
+## Requisitos e inicio
+
+Python 3.10 o posterior. Desde esta carpeta, en PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python api_server.py
 ```
-agent_skeleton/
-├── events.py          # Contrato de eventos (envelope + payload por tipo)
-├── tools.py            # Contrato + ejecución de tools, sandboxing de rutas
-├── permission_gate.py  # Confirmar/no confirmar (mínimo; niveles finos en sem. 3-4)
-├── event_bus.py         # Bus local in-process, sin red
-├── proxy_client.py      # Único módulo que sabe hablar con el proxy (SDK openai)
-├── agent_loop.py        # Orquesta todo lo anterior
-└── demo/
-    ├── mock_proxy.py    # Proxy falso con guion, para probar sin red
-    └── run_demo.py      # Corre el loop de punta a punta
+
+La API escucha en `http://127.0.0.1:8000`. Los datos locales se guardan en `data/assistant.db`; los proyectos nuevos se crean dentro de `workspaces/`. Para parar el servidor, usa Ctrl+C.
+
+## Probar la API
+
+En otra ventana de PowerShell:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/health
+
+$email = "dev-$([guid]::NewGuid().ToString('N').Substring(0,8))@example.com"
+$body = @{ email = $email; password = "una-clave-larga-123" } | ConvertTo-Json
+$session = Invoke-RestMethod http://127.0.0.1:8000/api/v1/auth/register -Method Post -ContentType "application/json" -Body $body
+$headers = @{ Authorization = "Bearer $($session.token)" }
+
+$projectBody = @{ name = "Demo local"; path = "demo-local" } | ConvertTo-Json
+$project = Invoke-RestMethod http://127.0.0.1:8000/api/v1/projects -Method Post -Headers $headers -ContentType "application/json" -Body $projectBody
+$projectId = $project.project.id
+
+$taskBody = @{ message = "Resume este proyecto" } | ConvertTo-Json
+$task = Invoke-RestMethod "http://127.0.0.1:8000/api/v1/projects/$projectId/tasks" -Method Post -Headers $headers -ContentType "application/json" -Body $taskBody
+$task
 ```
 
-## Cómo correr la demo (sin proxy real)
+En modo local sin modelo, la tarea termina con una respuesta de conexión. La respuesta incluye `events_url`; Electron puede consumirla con `fetch` y leer el flujo SSE usando el mismo encabezado Bearer. Cada evento conserva el contrato de `events.py`.
 
-```bash
-pip install pydantic
+Para probar la demo del loop por separado:
+
+```powershell
 python demo/run_demo.py
 ```
 
-Esto crea un proyecto temporal con un `main.py`, y simula que GPT pide leer,
-editar y correr el archivo, emitiendo cada evento del bus por consola.
+La demo usa un proxy simulado y aprueba sus acciones de ejemplo. La API local solicita aprobación explícita para editar archivos y correr comandos: escucha `permission_request` en el flujo SSE y responde a `POST /api/v1/tasks/{task_id}/permissions/{tool_call_id}` con `{ "approved": true }` o `{ "approved": false }`. La espera expira después de 120 segundos y entonces se deniega.
 
-## Cómo conectarlo al proxy real
+## Conectar el proxy de IA
 
-Cuando Rodrigo tenga el endpoint `/v1/chat` mínimo:
+Instala el SDK e indica la URL de tu proxy y su token de sesión antes de iniciar el servidor:
 
-```python
-from proxy_client import OpenAISDKProxyClient
-from event_bus import EventBus
-from permission_gate import PermissionGate
-from agent_loop import AgentLoop
-
-proxy = OpenAISDKProxyClient(
-    base_url="https://tu-proxy.example.com",
-    session_token=token_de_sesion_del_usuario,  # NUNCA la API key de OpenAI
-)
-loop = AgentLoop(proxy, EventBus(), PermissionGate(confirm_callback=preguntar_a_la_mascota))
-loop.run(session_id="sess_1", user_message="...", project_root=Path("/ruta/al/proyecto"))
+```powershell
+python -m pip install "openai>=1.30"
+$env:PROXY_URL = "https://tu-proxy.example.com/v1"
+$env:PROXY_SESSION_TOKEN = "token-de-sesion-del-proxy"
+python api_server.py
 ```
 
-Requiere `pip install openai` (solo para esta implementación real del cliente;
-el resto del paquete no depende de esa librería).
+El proxy debe aceptar las solicitudes de chat completions y function calling que produce el SDK. La clave del proveedor de IA permanece en el proxy, no en esta aplicación local.
 
-## Qué falta a propósito (fuera del esqueleto semana 1-2)
+## Carpetas de proyectos
 
-- `list_files`, `search`, `run_tests`, `git` como tools (semana 3-4). Se
-  agregan siguiendo el mismo patrón de `tools.py`: schema + risk level +
-  implementación.
-- Niveles finos del permission gate cruzados con "modo de trabajo".
-- Streaming real (SSE) del proxy — `ProxyClient.chat` hoy devuelve la
-  respuesta completa; cuando se agregue streaming, se puede emitir
-  `agent_thinking` por cada delta antes de que llegue el `tool_use` o texto
-  final, sin cambiar la interfaz que usa `agent_loop.py`.
-- Persistencia de memoria/XP (SQLite) — se conecta suscribiéndose al
-  `EventBus`, no modificando el loop.
-- El servidor FastAPI + WebSocket local que expone este loop a Electron.
+Por defecto, `path` es relativo a `workspaces/`; la API rechaza rutas que intenten salir de esa raíz. Para trabajar sobre una carpeta de código existente, define `WORKSPACE_ROOT` como su carpeta contenedora y envía una ruta relativa al crear el proyecto:
 
-## Por qué está separado así
+```powershell
+$env:WORKSPACE_ROOT = "C:\repos"
+# Al crear el proyecto, usa path = "mi-aplicacion".
+python api_server.py
+```
 
-- `events.py` y `tools.py` son **contratos**: si cambian, cambian ahí y solo
-  ahí. El resto del equipo (mascota, XP, memoria) puede construir contra
-  estos esquemas sin esperar a que el loop esté terminado.
-- `proxy_client.py` es el único lugar que sabe que existe un proxy/HTTP —
-  coincide con la nota de la planeación de aislar esa llamada en un módulo.
-- `agent_loop.py` no importa `openai` ni sabe de Electron: por eso se puede
-  probar con `mock_proxy.py` sin infraestructura real.
+Las tres herramientas actuales son `read_file`, `edit_file` y `run_command`. Las rutas de archivo se confinan al workspace seleccionado. Los comandos y cambios de archivo pasan por el permiso del usuario.
+
+## GitHub
+
+Para habilitar la consulta de repositorios accesibles, configura un token de lectura antes de iniciar:
+
+```powershell
+$env:GITHUB_TOKEN = "ghp_reemplazar"
+python api_server.py
+```
+
+Con una sesión autenticada, `GET /api/v1/github/status` muestra si el conector está configurado y `GET /api/v1/github/repositories` devuelve repositorios. El token solo vive en el entorno del proceso y no se guarda en SQLite. Crear commits y Pull Requests no está habilitado todavía.
+
+## Configuración opcional
+
+- `HOST`: dirección de escucha; por defecto `127.0.0.1`.
+- `PORT`: puerto HTTP; por defecto `8000`.
+- `WORKSPACE_ROOT`: raíz permitida para proyectos; por defecto `./workspaces`.
+- `APP_DATA_DIR` o `DATABASE_PATH`: ubicación de datos de la aplicación.
+- `CORS_ORIGINS`: lista separada por comas de orígenes web permitidos; por defecto puertos locales 3000 y 5173.
+
+La primera cuenta no recibe permisos de administrador. Los errores HTTP usan `{ "error": { "code": "...", "message": "..." } }`.
